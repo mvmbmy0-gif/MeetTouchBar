@@ -2,7 +2,7 @@
 
 # 🇺🇦 Проєкт розроблений українцем / Project developed by a Ukrainian 🇺🇦
 
-[![Stand With Ukraine](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/badges/StandWithUkraine.svg)](https://stand-with-ukraine.pp.ua)
+[![Stand With Ukraine](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner2-no-action.svg)](https://stand-with-ukraine.pp.ua)
 
 <p align="center">
   <img src="pictures/meet_active.png" alt="Meet TouchBar Active" width="960">

@@ -1,6 +1,4 @@
 #import <Cocoa/Cocoa.h>
-#import <Carbon/Carbon.h>
-#import <ApplicationServices/ApplicationServices.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -17,20 +15,17 @@
 extern void DFRElementSetControlStripPresenceForIdentifier(NSTouchBarItemIdentifier identifier, BOOL present);
 extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
 
-@interface UniversalTouchBarController : NSObject <NSApplicationDelegate, NSTouchBarDelegate>
-// --- Спільні елементи ---
-@property (strong) NSStatusItem *statusItem;
-
-// --- Meet UI & стан ---
-@property (strong) NSCustomTouchBarItem *meetTrayItem;
-@property (copy) NSString *currentMeetTrayId;
-@property (assign) NSInteger meetTrayCounter;
+@interface MeetBarController : NSObject <NSApplicationDelegate, NSTouchBarDelegate>
+@property (strong) NSCustomTouchBarItem *trayItem;
+@property (copy) NSString *currentTrayId;
+@property (assign) NSInteger trayCounter;
 
 @property (strong) NSTouchBar *meetTouchBar;
-@property (strong) NSArray<NSTouchBarItemIdentifier> *meetMainIdentifiers;
-@property (strong) NSArray<NSTouchBarItemIdentifier> *meetMainIdentifiersWithFocus;
-@property (strong) NSArray<NSTouchBarItemIdentifier> *meetReactionIdentifiers;
-@property (strong) NSTimer *meetWatchdogTimer;
+@property (strong) NSArray<NSTouchBarItemIdentifier> *mainIdentifiers;
+@property (strong) NSArray<NSTouchBarItemIdentifier> *mainIdentifiersWithFocus;
+@property (strong) NSArray<NSTouchBarItemIdentifier> *reactionIdentifiers;
+@property (strong) NSStatusItem *statusItem;
+@property (strong) NSTimer *watchdogTimer;
 
 @property (strong) NSButton *micButton;
 @property (strong) NSButton *camButton;
@@ -39,30 +34,14 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
 @property (strong) NSMutableArray<NSString *> *commandQueue;
 @property (strong) dispatch_semaphore_t cmdSemaphore;
 @property (strong) NSDate *lastMeetPing;
-@property (assign) BOOL isMeetBarVisible;
+@property (assign) BOOL isBarVisible;
 @property (assign) BOOL isShowingReactions;
 @property (assign) BOOL isOnMeetTab;
-@property (assign) BOOL isMeetTrayVisible;
-@property (assign) BOOL userDismissedMeetManually;
-
-// --- Arduino UI & стан ---
-@property (strong) NSCustomTouchBarItem *arduinoTrayItem;
-@property (copy) NSString *currentArduinoTrayId;
-@property (assign) NSInteger arduinoTrayCounter;
-
-@property (strong) NSTouchBar *arduinoTouchBar;
-@property (strong) NSArray<NSTouchBarItemIdentifier> *arduinoMainIdentifiers;
-@property (strong) NSArray<NSTouchBarItemIdentifier> *arduinoMainIdentifiersWithWindows;
-
-@property (strong) NSArray<NSDictionary *> *openArduinoWindows;
-@property (assign) BOOL isArduinoBarVisible;
-@property (assign) BOOL isArduinoTrayVisible;
-@property (assign) BOOL isShowingArduinoWindows;
-@property (assign) BOOL userDismissedArduinoManually;
-
+@property (assign) BOOL isTrayVisible;
+@property (assign) BOOL userDismissedManually;
 @end
 
-@implementation UniversalTouchBarController
+@implementation MeetBarController
 
 - (NSImage *)sfSymbol:(NSString *)name {
     if (@available(macOS 11.0, *)) {
@@ -75,12 +54,10 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
     return nil;
 }
 
-#pragma mark - Meet Tray Item
-
-- (void)createMeetTrayItem {
-    self.meetTrayCounter += 1;
-    self.currentMeetTrayId = [NSString stringWithFormat:@"com.local.meetbar.tray.%ld", (long)self.meetTrayCounter];
-    self.meetTrayItem = [[NSCustomTouchBarItem alloc] initWithIdentifier:self.currentMeetTrayId];
+- (void)createTrayItem {
+    self.trayCounter += 1;
+    self.currentTrayId = [NSString stringWithFormat:@"com.local.meetbar.tray.%ld", (long)self.trayCounter];
+    self.trayItem = [[NSCustomTouchBarItem alloc] initWithIdentifier:self.currentTrayId];
 
     NSImage *trayImg = [self sfSymbol:@"video.fill"];
     if (@available(macOS 11.0, *)) {
@@ -108,361 +85,17 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
     [trayBtn setButtonType:NSButtonTypeMomentaryChange];
     trayBtn.bordered = NO;
     trayBtn.wantsLayer = YES;
+    // Точний темніший тон Control Strip (#3B3B3D -> 59/255) та ширина 38pt як у сусідніх кнопок
     trayBtn.layer.backgroundColor = [NSColor colorWithDisplayP3Red:54.5/255.0 green:54.5/255.0 blue:55.0/255.0 alpha:1.0].CGColor;
     trayBtn.layer.cornerRadius = 0.0;
     [trayBtn.widthAnchor constraintEqualToConstant:38].active = YES;
 
-    self.meetTrayItem.view = trayBtn;
-    [NSTouchBarItem addSystemTrayItem:self.meetTrayItem];
-    DFRElementSetControlStripPresenceForIdentifier(self.currentMeetTrayId, YES);
-    self.isMeetTrayVisible = YES;
+    self.trayItem.view = trayBtn;
+
+    [NSTouchBarItem addSystemTrayItem:self.trayItem];
+    DFRElementSetControlStripPresenceForIdentifier(self.currentTrayId, YES);
+    self.isTrayVisible = YES;
 }
-
-#pragma mark - Arduino Tray Item
-
-- (void)createArduinoTrayItem {
-    self.arduinoTrayCounter += 1;
-    self.currentArduinoTrayId = [NSString stringWithFormat:@"com.local.arduinobar.tray.%ld", (long)self.arduinoTrayCounter];
-    self.arduinoTrayItem = [[NSCustomTouchBarItem alloc] initWithIdentifier:self.currentArduinoTrayId];
-
-    NSImage *trayImg = [self sfSymbol:@"cpu"];
-    if (@available(macOS 11.0, *)) {
-        if (trayImg) {
-            NSImageSymbolConfiguration *cfg = [NSImageSymbolConfiguration configurationWithPointSize:15.5 weight:NSFontWeightRegular];
-            trayImg = [trayImg imageWithSymbolConfiguration:cfg];
-            NSImage *whiteImg = [NSImage imageWithSize:trayImg.size flipped:NO drawingHandler:^BOOL(NSRect dstRect) {
-                [trayImg drawInRect:dstRect];
-                [[NSColor whiteColor] set];
-                NSRectFillUsingOperation(dstRect, NSCompositingOperationSourceAtop);
-                return YES;
-            }];
-            [whiteImg setTemplate:NO];
-            trayImg = whiteImg;
-        }
-    }
-
-    NSButton *trayBtn = nil;
-    if (trayImg) {
-        trayBtn = [NSButton buttonWithImage:trayImg target:self action:@selector(toggleArduinoBar:)];
-        trayBtn.imageScaling = NSImageScaleNone;
-    } else {
-        trayBtn = [NSButton buttonWithTitle:@"INO" target:self action:@selector(toggleArduinoBar:)];
-    }
-    [trayBtn setButtonType:NSButtonTypeMomentaryChange];
-    trayBtn.bordered = NO;
-    trayBtn.wantsLayer = YES;
-    trayBtn.layer.backgroundColor = [NSColor colorWithDisplayP3Red:54.5/255.0 green:54.5/255.0 blue:55.0/255.0 alpha:1.0].CGColor;
-    trayBtn.layer.cornerRadius = 0.0;
-    [trayBtn.widthAnchor constraintEqualToConstant:38].active = YES;
-
-    self.arduinoTrayItem.view = trayBtn;
-    [NSTouchBarItem addSystemTrayItem:self.arduinoTrayItem];
-    DFRElementSetControlStripPresenceForIdentifier(self.currentArduinoTrayId, YES);
-    self.isArduinoTrayVisible = YES;
-}
-
-#pragma mark - Application Lifecycle
-
-- (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    // Перевірка дозволу Accessibility (без спаму діалогів, якщо вже надано)
-    NSDictionary *opts = @{(__bridge id)kAXTrustedCheckOptionPrompt: @NO};
-    AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)opts);
-
-    // Meet стан
-    self.commandQueue = [NSMutableArray array];
-    self.cmdSemaphore = dispatch_semaphore_create(0);
-    self.meetTrayCounter = 0;
-    self.isMeetBarVisible = NO;
-    self.isShowingReactions = NO;
-    self.isOnMeetTab = YES;
-    self.isMeetTrayVisible = NO;
-    self.userDismissedMeetManually = NO;
-
-    // Arduino стан
-    self.arduinoTrayCounter = 0;
-    self.isShowingArduinoWindows = NO;
-    self.isArduinoBarVisible = NO;
-    self.isArduinoTrayVisible = NO;
-    self.userDismissedArduinoManually = NO;
-    self.openArduinoWindows = @[];
-
-    // Єдине меню у рядку стану (Menu Bar)
-    self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
-    NSImage *menuImg = [self sfSymbol:@"slider.horizontal.below.rectangle"];
-    if (menuImg) {
-        self.statusItem.button.image = menuImg;
-    } else {
-        self.statusItem.button.title = @"TouchBar";
-    }
-    NSMenu *menu = [[NSMenu alloc] init];
-    [menu addItemWithTitle:@"Панель Meet" action:@selector(toggleMeetBar:) keyEquivalent:@"m"];
-    [menu addItemWithTitle:@"Панель Arduino" action:@selector(toggleArduinoBar:) keyEquivalent:@"a"];
-    [menu addItem:[NSMenuItem separatorItem]];
-    [menu addItemWithTitle:@"Вийти" action:@selector(terminate:) keyEquivalent:@"q"];
-    self.statusItem.menu = menu;
-
-    DFRSystemModalShowsCloseBoxWhenFrontMost(YES);
-
-    // Ідентифікатори Meet
-    self.meetMainIdentifiers = @[
-        @"com.local.meet.mic",
-        @"com.local.meet.cam",
-        @"com.local.meet.hand",
-        @"com.local.meet.reactions"
-    ];
-
-    self.meetMainIdentifiersWithFocus = @[
-        @"com.local.meet.mic",
-        @"com.local.meet.cam",
-        @"com.local.meet.hand",
-        @"com.local.meet.reactions",
-        @"com.local.meet.focus"
-    ];
-
-    self.meetReactionIdentifiers = @[
-        @"emoji.back",
-        @"emoji.heart",
-        @"emoji.like",
-        @"emoji.party",
-        @"emoji.clap",
-        @"emoji.laugh",
-        @"emoji.wow",
-        @"emoji.sad",
-        @"emoji.think",
-        @"emoji.dislike"
-    ];
-
-    self.meetTouchBar = [[NSTouchBar alloc] init];
-    self.meetTouchBar.delegate = self;
-    self.meetTouchBar.defaultItemIdentifiers = self.meetMainIdentifiers;
-
-    // Ідентифікатори Arduino
-    self.arduinoMainIdentifiers = @[
-        @"com.local.ino.verify",
-        @"com.local.ino.upload",
-        @"com.local.ino.serial",
-        @"com.local.ino.sketchbook",
-        @"com.local.ino.libs"
-    ];
-
-    self.arduinoMainIdentifiersWithWindows = @[
-        @"com.local.ino.verify",
-        @"com.local.ino.upload",
-        @"com.local.ino.serial",
-        @"com.local.ino.sketchbook",
-        @"com.local.ino.libs",
-        @"com.local.ino.windows"
-    ];
-
-    self.arduinoTouchBar = [[NSTouchBar alloc] init];
-    self.arduinoTouchBar.delegate = self;
-    self.arduinoTouchBar.defaultItemIdentifiers = self.arduinoMainIdentifiers;
-
-    // Реактивне відстеження активного вікна (БЕЗ фонових таймерів, 0% CPU!)
-    [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self
-                                                           selector:@selector(activeAppChanged:)
-                                                               name:NSWorkspaceDidActivateApplicationNotification
-                                                             object:nil];
-
-    [self checkFrontApp];
-
-    // Запуск HTTP-сервера для зв'язку з Meet розширенням
-    [self startHTTPServer];
-}
-
-#pragma mark - Arduino Logic (Працює ТІЛЬКИ коли Arduino відкритий)
-
-- (NSRunningApplication *)findArduinoApp {
-    NSRunningApplication *front = [[NSWorkspace sharedWorkspace] frontmostApplication];
-    NSString *name = front.localizedName ?: @"";
-    NSString *bid = front.bundleIdentifier ?: @"";
-    if ([name rangeOfString:@"Arduino" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [bid rangeOfString:@"arduino" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-        return front;
-    }
-    return nil;
-}
-
-- (NSString *)formatWindowTitle:(NSString *)rawTitle {
-    NSString *clean = rawTitle ?: @"Скетч";
-    NSArray *seps = @[@" — Arduino IDE", @" - Arduino IDE", @" | Arduino IDE"];
-    for (NSString *sep in seps) {
-        NSRange r = [clean rangeOfString:sep];
-        if (r.location != NSNotFound) {
-            clean = [clean substringToIndex:r.location];
-            break;
-        }
-    }
-    if (clean.length > 24) {
-        clean = [[clean substringToIndex:23] stringByAppendingString:@"…"];
-    }
-    return clean;
-}
-
-- (void)refreshArduinoWindowsForApp:(NSRunningApplication *)app {
-    if (!app || !AXIsProcessTrusted()) return;
-
-    NSMutableArray *found = [NSMutableArray array];
-    AXUIElementRef appRef = AXUIElementCreateApplication(app.processIdentifier);
-    CFArrayRef winList = NULL;
-    if (AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute, (CFTypeRef *)&winList) == kAXErrorSuccess && winList != NULL) {
-        CFIndex count = CFArrayGetCount(winList);
-        for (CFIndex i = 0; i < count; i++) {
-            AXUIElementRef winRef = (AXUIElementRef)CFArrayGetValueAtIndex(winList, i);
-            CFTypeRef titleRef = NULL;
-            AXUIElementCopyAttributeValue(winRef, kAXTitleAttribute, &titleRef);
-            NSString *rawTitle = titleRef ? (__bridge_transfer NSString *)titleRef : @"";
-            if (rawTitle.length == 0) continue;
-
-            [found addObject:@{
-                @"title": [self formatWindowTitle:rawTitle],
-                @"rawTitle": rawTitle,
-                @"pid": @(app.processIdentifier)
-            }];
-        }
-        CFRelease(winList);
-    }
-    CFRelease(appRef);
-
-    BOOL countChanged = ((self.openArduinoWindows.count > 1) != (found.count > 1));
-    self.openArduinoWindows = found;
-
-    if (self.isArduinoBarVisible && !self.isShowingArduinoWindows && countChanged) {
-        self.arduinoTouchBar.defaultItemIdentifiers = (self.openArduinoWindows.count > 1) ? self.arduinoMainIdentifiersWithWindows : self.arduinoMainIdentifiers;
-    }
-}
-
-- (void)activeAppChanged:(NSNotification *)note {
-    [self checkFrontApp];
-}
-
-- (void)checkFrontApp {
-    NSRunningApplication *arduino = [self findArduinoApp];
-    if (arduino) {
-        [self refreshArduinoWindowsForApp:arduino];
-        if (!self.isArduinoTrayVisible) {
-            [self createArduinoTrayItem];
-        }
-        if (!self.isArduinoBarVisible && !self.userDismissedArduinoManually) {
-            [self showArduinoBar];
-        }
-    } else {
-        [self hideArduinoBar];
-    }
-}
-
-- (void)showArduinoBar {
-    if (!self.isArduinoTrayVisible) {
-        [self createArduinoTrayItem];
-    }
-    self.isShowingArduinoWindows = NO;
-    self.arduinoTouchBar.defaultItemIdentifiers = (self.openArduinoWindows.count > 1) ? self.arduinoMainIdentifiersWithWindows : self.arduinoMainIdentifiers;
-    [NSTouchBar presentSystemModalTouchBar:self.arduinoTouchBar systemTrayItemIdentifier:self.currentArduinoTrayId];
-    self.isArduinoBarVisible = YES;
-    self.userDismissedArduinoManually = NO;
-}
-
-- (void)hideArduinoBar {
-    if (self.isArduinoBarVisible) {
-        [NSTouchBar dismissSystemModalTouchBar:self.arduinoTouchBar];
-        self.isArduinoBarVisible = NO;
-        self.isShowingArduinoWindows = NO;
-        self.arduinoTouchBar.defaultItemIdentifiers = self.arduinoMainIdentifiers;
-    }
-    if (self.isArduinoTrayVisible && self.currentArduinoTrayId) {
-        DFRElementSetControlStripPresenceForIdentifier(self.currentArduinoTrayId, NO);
-        self.isArduinoTrayVisible = NO;
-    }
-    self.userDismissedArduinoManually = NO;
-}
-
-- (void)toggleArduinoBar:(id)sender {
-    if (self.isArduinoBarVisible) {
-        [NSTouchBar dismissSystemModalTouchBar:self.arduinoTouchBar];
-        self.isArduinoBarVisible = NO;
-        self.isShowingArduinoWindows = NO;
-        self.userDismissedArduinoManually = YES;
-    } else {
-        [self showArduinoBar];
-    }
-}
-
-- (void)openArduinoWindowsMenu:(id)sender {
-    NSRunningApplication *arduino = [self findArduinoApp];
-    if (arduino) [self refreshArduinoWindowsForApp:arduino];
-    if (self.openArduinoWindows.count <= 1) return;
-    self.isShowingArduinoWindows = YES;
-    NSMutableArray *ids = [NSMutableArray arrayWithObject:@"com.local.ino.back"];
-    for (NSUInteger i = 0; i < MIN(self.openArduinoWindows.count, 5); i++) {
-        [ids addObject:[NSString stringWithFormat:@"com.local.ino.win.%lu", (unsigned long)i]];
-    }
-    self.arduinoTouchBar.defaultItemIdentifiers = ids;
-}
-
-- (void)closeArduinoWindowsMenu:(id)sender {
-    self.isShowingArduinoWindows = NO;
-    self.arduinoTouchBar.defaultItemIdentifiers = (self.openArduinoWindows.count > 1) ? self.arduinoMainIdentifiersWithWindows : self.arduinoMainIdentifiers;
-}
-
-- (void)raiseArduinoWindow:(NSButton *)sender {
-    NSInteger pos = sender.tag;
-    if (pos < 0 || pos >= (NSInteger)self.openArduinoWindows.count) return;
-
-    NSDictionary *info = self.openArduinoWindows[pos];
-    pid_t pid = [info[@"pid"] intValue];
-    NSString *targetRaw = info[@"rawTitle"] ?: @"";
-
-    if (pid > 0 && AXIsProcessTrusted()) {
-        AXUIElementRef appRef = AXUIElementCreateApplication(pid);
-        CFArrayRef winList = NULL;
-        if (AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute, (CFTypeRef *)&winList) == kAXErrorSuccess && winList != NULL) {
-            CFIndex count = CFArrayGetCount(winList);
-            for (CFIndex i = 0; i < count; i++) {
-                AXUIElementRef winRef = (AXUIElementRef)CFArrayGetValueAtIndex(winList, i);
-                CFTypeRef titleRef = NULL;
-                AXUIElementCopyAttributeValue(winRef, kAXTitleAttribute, &titleRef);
-                NSString *t = titleRef ? (__bridge_transfer NSString *)titleRef : @"";
-                if ([t isEqualToString:targetRaw] || (count == 1)) {
-                    AXUIElementPerformAction(winRef, kAXRaiseAction);
-                    AXUIElementSetAttributeValue(winRef, kAXMainAttribute, kCFBooleanTrue);
-                    break;
-                }
-            }
-            CFRelease(winList);
-        }
-        CFRelease(appRef);
-
-        NSRunningApplication *app = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
-        [app activateWithOptions:0];
-    }
-    [self closeArduinoWindowsMenu:nil];
-}
-
-- (void)sendKeyCode:(CGKeyCode)keyCode flags:(CGEventFlags)flags {
-    if (!AXIsProcessTrusted()) {
-        NSDictionary *opts = @{(__bridge id)kAXTrustedCheckOptionPrompt: @YES};
-        AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)opts);
-        return;
-    }
-    CGEventSourceRef src = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-    CGEventRef down = CGEventCreateKeyboardEvent(src, keyCode, true);
-    CGEventRef up = CGEventCreateKeyboardEvent(src, keyCode, false);
-    CGEventSetFlags(down, flags);
-    CGEventSetFlags(up, flags);
-    CGEventPost(kCGHIDEventTap, down);
-    CGEventPost(kCGHIDEventTap, up);
-    CFRelease(down);
-    CFRelease(up);
-    CFRelease(src);
-}
-
-- (void)doVerify:(id)sender     { [self sendKeyCode:kVK_ANSI_R flags:kCGEventFlagMaskCommand]; }
-- (void)doUpload:(id)sender     { [self sendKeyCode:kVK_ANSI_U flags:kCGEventFlagMaskCommand]; }
-- (void)doSerial:(id)sender     { [self sendKeyCode:kVK_ANSI_M flags:(kCGEventFlagMaskCommand | kCGEventFlagMaskShift)]; }
-- (void)doSketchbook:(id)sender { [self sendKeyCode:kVK_ANSI_B flags:(kCGEventFlagMaskCommand | kCGEventFlagMaskShift)]; }
-- (void)doLibs:(id)sender       { [self sendKeyCode:kVK_ANSI_I flags:(kCGEventFlagMaskCommand | kCGEventFlagMaskShift)]; }
-
-#pragma mark - HTTP Server & Meet Logic
 
 - (void)startHTTPServer {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -504,28 +137,19 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (hasMeet) {
                         self.lastMeetPing = [NSDate date];
-                        if (!self.isMeetTrayVisible) {
-                            [self createMeetTrayItem];
+                        if (!self.isTrayVisible) {
+                            [self createTrayItem];
                         }
                         if (self.isOnMeetTab != onMeet) {
                             self.isOnMeetTab = onMeet;
-                            if (!self.isShowingReactions && self.isMeetBarVisible) {
-                                self.meetTouchBar.defaultItemIdentifiers = onMeet ? self.meetMainIdentifiers : self.meetMainIdentifiersWithFocus;
+                            if (!self.isShowingReactions && self.isBarVisible) {
+                                self.meetTouchBar.defaultItemIdentifiers = onMeet ? self.mainIdentifiers : self.mainIdentifiersWithFocus;
                             }
                         }
-                        if (!self.isMeetBarVisible && !self.userDismissedMeetManually) {
+                        if (!self.isBarVisible && !self.userDismissedManually) {
                             [self showMeetBar];
                         }
                         [self updateButtonsWithMic:micOn cam:camOn hand:handUp];
-
-                        // Запускаємо сторожовий таймер тільки при активному дзвінку
-                        if (!self.meetWatchdogTimer) {
-                            self.meetWatchdogTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
-                                                                                      target:self
-                                                                                    selector:@selector(checkWatchdog)
-                                                                                    userInfo:nil
-                                                                                     repeats:YES];
-                        }
                     } else {
                         [self hideMeetUI];
                     }
@@ -565,29 +189,88 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
 }
 
 - (void)hideMeetUI {
-    if (self.isMeetBarVisible) {
+    if (self.isBarVisible) {
         [NSTouchBar dismissSystemModalTouchBar:self.meetTouchBar];
-        self.isMeetBarVisible = NO;
+        self.isBarVisible = NO;
         self.isShowingReactions = NO;
-        self.meetTouchBar.defaultItemIdentifiers = self.meetMainIdentifiers;
+        self.meetTouchBar.defaultItemIdentifiers = self.mainIdentifiers;
     }
-    if (self.isMeetTrayVisible && self.currentMeetTrayId) {
-        DFRElementSetControlStripPresenceForIdentifier(self.currentMeetTrayId, NO);
-        self.isMeetTrayVisible = NO;
+    if (self.isTrayVisible && self.currentTrayId) {
+        DFRElementSetControlStripPresenceForIdentifier(self.currentTrayId, NO);
+        self.isTrayVisible = NO;
     }
-    self.userDismissedMeetManually = NO;
-
-    // Зупиняємо таймер Meet, коли дзвінок закритий — 0% CPU!
-    if (self.meetWatchdogTimer) {
-        [self.meetWatchdogTimer invalidate];
-        self.meetWatchdogTimer = nil;
-    }
+    self.userDismissedManually = NO;
 }
 
 - (void)checkWatchdog {
-    if (self.lastMeetPing == nil || [[NSDate date] timeIntervalSinceDate:self.lastMeetPing] > 3.0) {
+    if (self.lastMeetPing == nil || [[NSDate date] timeIntervalSinceDate:self.lastMeetPing] > 2.5) {
         [self hideMeetUI];
     }
+}
+
+- (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    self.commandQueue = [NSMutableArray array];
+    self.cmdSemaphore = dispatch_semaphore_create(0);
+    self.trayCounter = 0;
+    self.isBarVisible = NO;
+    self.isShowingReactions = NO;
+    self.isOnMeetTab = YES;
+    self.isTrayVisible = NO;
+    self.userDismissedManually = NO;
+
+    self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
+    NSImage *menuImg = [self sfSymbol:@"video.bubble.left.fill"];
+    if (menuImg) {
+        self.statusItem.button.image = menuImg;
+    } else {
+        self.statusItem.button.title = @"MeetBar";
+    }
+    NSMenu *menu = [[NSMenu alloc] init];
+    [menu addItemWithTitle:@"Показати / Сховати панель Meet" action:@selector(toggleMeetBar:) keyEquivalent:@"m"];
+    [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItemWithTitle:@"Вийти з MeetBar" action:@selector(terminate:) keyEquivalent:@"q"];
+    self.statusItem.menu = menu;
+
+    DFRSystemModalShowsCloseBoxWhenFrontMost(YES);
+
+    self.mainIdentifiers = @[
+        @"com.local.meet.mic",
+        @"com.local.meet.cam",
+        @"com.local.meet.hand",
+        @"com.local.meet.reactions"
+    ];
+
+    self.mainIdentifiersWithFocus = @[
+        @"com.local.meet.mic",
+        @"com.local.meet.cam",
+        @"com.local.meet.hand",
+        @"com.local.meet.reactions",
+        @"com.local.meet.focus"
+    ];
+
+    self.reactionIdentifiers = @[
+        @"emoji.back",
+        @"emoji.heart",
+        @"emoji.like",
+        @"emoji.party",
+        @"emoji.clap",
+        @"emoji.laugh",
+        @"emoji.wow",
+        @"emoji.sad",
+        @"emoji.think",
+        @"emoji.dislike"
+    ];
+
+    self.meetTouchBar = [[NSTouchBar alloc] init];
+    self.meetTouchBar.delegate = self;
+    self.meetTouchBar.defaultItemIdentifiers = self.mainIdentifiers;
+
+    [self startHTTPServer];
+    self.watchdogTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                          target:self
+                                                        selector:@selector(checkWatchdog)
+                                                        userInfo:nil
+                                                         repeats:YES];
 }
 
 - (void)updateButtonsWithMic:(BOOL)micOn cam:(BOOL)camOn hand:(BOOL)handUp {
@@ -607,34 +290,34 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
 }
 
 - (void)showMeetBar {
-    if (!self.isMeetTrayVisible) {
-        [self createMeetTrayItem];
+    if (!self.isTrayVisible) {
+        [self createTrayItem];
     }
     self.isShowingReactions = NO;
-    self.meetTouchBar.defaultItemIdentifiers = self.isOnMeetTab ? self.meetMainIdentifiers : self.meetMainIdentifiersWithFocus;
-    [NSTouchBar presentSystemModalTouchBar:self.meetTouchBar systemTrayItemIdentifier:self.currentMeetTrayId];
-    self.isMeetBarVisible = YES;
-    self.userDismissedMeetManually = NO;
+    self.meetTouchBar.defaultItemIdentifiers = self.isOnMeetTab ? self.mainIdentifiers : self.mainIdentifiersWithFocus;
+    [NSTouchBar presentSystemModalTouchBar:self.meetTouchBar systemTrayItemIdentifier:self.currentTrayId];
+    self.isBarVisible = YES;
+    self.userDismissedManually = NO;
 }
 
 - (void)openReactionsBar:(id)sender {
     self.isShowingReactions = YES;
-    self.meetTouchBar.defaultItemIdentifiers = self.meetReactionIdentifiers;
+    self.meetTouchBar.defaultItemIdentifiers = self.reactionIdentifiers;
 }
 
 - (void)closeReactionsBar:(id)sender {
     self.isShowingReactions = NO;
-    self.meetTouchBar.defaultItemIdentifiers = self.isOnMeetTab ? self.meetMainIdentifiers : self.meetMainIdentifiersWithFocus;
+    self.meetTouchBar.defaultItemIdentifiers = self.isOnMeetTab ? self.mainIdentifiers : self.mainIdentifiersWithFocus;
     [self enqueueCommand:@"closeReactions"];
 }
 
 - (void)toggleMeetBar:(id)sender {
-    if (self.isMeetBarVisible) {
+    if (self.isBarVisible) {
         [NSTouchBar dismissSystemModalTouchBar:self.meetTouchBar];
-        self.isMeetBarVisible = NO;
+        self.isBarVisible = NO;
         self.isShowingReactions = NO;
-        self.meetTouchBar.defaultItemIdentifiers = self.isOnMeetTab ? self.meetMainIdentifiers : self.meetMainIdentifiersWithFocus;
-        self.userDismissedMeetManually = YES;
+        self.meetTouchBar.defaultItemIdentifiers = self.isOnMeetTab ? self.mainIdentifiers : self.mainIdentifiersWithFocus;
+        self.userDismissedManually = YES;
     } else {
         [self showMeetBar];
     }
@@ -670,13 +353,10 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
     return btn;
 }
 
-#pragma mark - Unified TouchBar Delegate
-
 - (NSTouchBarItem *)touchBar:(NSTouchBar *)touchBar makeItemForIdentifier:(NSTouchBarItemIdentifier)identifier {
     NSCustomTouchBarItem *item = [[NSCustomTouchBarItem alloc] initWithIdentifier:identifier];
     NSButton *btn = nil;
 
-    // === Кнопки Meet ===
     if ([identifier isEqualToString:@"com.local.meet.mic"]) {
         btn = [self makeSymbolButton:@"mic.slash.fill" title:@"Мікрофон" action:@selector(toggleMic:)];
         self.micButton = btn;
@@ -712,31 +392,6 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
         btn = [self makeNotoEmojiButton:@"1f914" fallback:@"🤔" tag:8 width:46];
     } else if ([identifier isEqualToString:@"emoji.dislike"]) {
         btn = [self makeNotoEmojiButton:@"1f44e" fallback:@"👎" tag:9 width:46];
-    }
-    // === Кнопки Arduino ===
-    else if ([identifier isEqualToString:@"com.local.ino.verify"]) {
-        btn = [self makeSymbolButton:@"checkmark.circle" title:@"Перевірити" action:@selector(doVerify:)];
-    } else if ([identifier isEqualToString:@"com.local.ino.upload"]) {
-        btn = [self makeSymbolButton:@"arrow.right.circle" title:@"Зашити" action:@selector(doUpload:)];
-    } else if ([identifier isEqualToString:@"com.local.ino.serial"]) {
-        btn = [self makeSymbolButton:@"terminal" title:@"Монітор" action:@selector(doSerial:)];
-    } else if ([identifier isEqualToString:@"com.local.ino.sketchbook"]) {
-        btn = [self makeSymbolButton:@"folder" title:@"Скетчі" action:@selector(doSketchbook:)];
-    } else if ([identifier isEqualToString:@"com.local.ino.libs"]) {
-        btn = [self makeSymbolButton:@"books.vertical" title:@"Бібліотеки" action:@selector(doLibs:)];
-    } else if ([identifier isEqualToString:@"com.local.ino.windows"]) {
-        btn = [self makeSymbolButton:@"macwindow.on.rectangle" title:@"" action:@selector(openArduinoWindowsMenu:)];
-        [btn.widthAnchor constraintEqualToConstant:48].active = YES;
-    } else if ([identifier isEqualToString:@"com.local.ino.back"]) {
-        btn = [self makeSymbolButton:@"chevron.left" title:@"" action:@selector(closeArduinoWindowsMenu:)];
-        [btn.widthAnchor constraintEqualToConstant:64].active = YES;
-    } else if ([identifier hasPrefix:@"com.local.ino.win."]) {
-        NSInteger pos = [[identifier substringFromIndex:18] integerValue];
-        if (pos >= 0 && pos < (NSInteger)self.openArduinoWindows.count) {
-            NSDictionary *info = self.openArduinoWindows[pos];
-            btn = [self makeSymbolButton:@"doc.text" title:info[@"title"] action:@selector(raiseArduinoWindow:)];
-            btn.tag = pos;
-        }
     }
 
     if (btn) {
@@ -779,7 +434,7 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
-        UniversalTouchBarController *controller = [[UniversalTouchBarController alloc] init];
+        MeetBarController *controller = [[MeetBarController alloc] init];
         app.delegate = controller;
         [app run];
     }

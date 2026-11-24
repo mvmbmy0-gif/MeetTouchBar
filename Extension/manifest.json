@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "MeetTouchBar Bridge",
+  "version": "2.14",
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": [
+    "http://127.0.0.1:48123/*",
+    "https://meet.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

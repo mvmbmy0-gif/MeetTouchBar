@@ -2,10 +2,6 @@
 
 [![Stand With Ukraine](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner2-no-action.svg)](https://stand-with-ukraine.pp.ua)
 
-<p align="center">
-  <img src="pictures/meet_hero.png" alt="Meet TouchBar Full Showcase" width="100%">
-</p>
-
 # MacBook Pro Touch Bar for Google Meet
 ### 📹 Instant Mic, Camera, Hand, Reactions & Tab Focus from your Touch Bar
 
@@ -26,6 +22,10 @@
 | **Active Call**<br>Активний дзвінок | <img src="pictures/meet_active_card.png" width="100%" alt="Active Call"> |
 | **Idle / Muted**<br>Мікрофон вимкнено | <img src="pictures/meet_idle_card.png" width="100%" alt="Idle / Muted"> |
 | **Reactions**<br>Емодзі-реакції | <img src="pictures/meet_reactions_card.png" width="100%" alt="Reactions"> |
+
+<p align="center">
+  <img src="pictures/meet_hero.png" alt="TouchBar Full Showcase" width="100%">
+</p>
 
 ---
 

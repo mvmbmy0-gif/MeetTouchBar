@@ -1,11 +1,9 @@
 <div align="center">
 
-# 🇺🇦 Проєкт розроблений українцем / Project developed by a Ukrainian 🇺🇦
-
 [![Stand With Ukraine](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner2-no-action.svg)](https://stand-with-ukraine.pp.ua)
 
 <p align="center">
-  <img src="pictures/meet_active.png" alt="Meet TouchBar Active" width="960">
+  <img src="pictures/meet_hero.png" alt="Meet TouchBar Full Showcase" width="100%">
 </p>
 
 # MacBook Pro Touch Bar for Google Meet
@@ -23,11 +21,11 @@
 
 ## 📸 Screenshots / Знімки екрана
 
-| State / Стан | Touch Bar Screenshot |
-|---|---|
-| **Active Meeting** (Mic On, Cam On, Hand Raised) | <img src="pictures/meet_active.png" width="900" alt="Meet Active"> |
-| **Idle / Muted** (Camera On, Mic Muted) | <img src="pictures/meet_idle.png" width="900" alt="Meet Idle"> |
-| **Emoji Reactions Bar** | <img src="pictures/meet_reactions.png" width="900" alt="Reactions Bar"> |
+| State / Стан | Touch Bar Preview |
+| :--- | :--- |
+| **Active Call**<br>Активний дзвінок | <img src="pictures/meet_active_card.png" width="100%" alt="Active Call"> |
+| **Idle / Muted**<br>Мікрофон вимкнено | <img src="pictures/meet_idle_card.png" width="100%" alt="Idle / Muted"> |
+| **Reactions**<br>Емодзі-реакції | <img src="pictures/meet_reactions_card.png" width="100%" alt="Reactions"> |
 
 ---
 

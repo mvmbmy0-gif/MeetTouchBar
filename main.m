@@ -3,52 +3,6 @@
 #import <netinet/in.h>
 #import <arpa/inet.h>
 
-// ==============================================================================
-//  LANGUAGE / LOCALIZATION CONFIGURATION
-//  ------------------------------------------------------------------------------
-//  - Set FORCE_LANGUAGE to nil for automatic system language detection (en/uk),
-//    or explicitly set to @"en", @"uk", @"es", @"de", etc.
-//  - To add a new language, simply add a new key dictionary to kI18n below!
-// ==============================================================================
-
-#define FORCE_LANGUAGE nil
-
-static NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *kI18n = @{
-    @"en": @{
-        @"mic":         @"Mic",
-        @"cam":         @"Camera",
-        @"hand":        @"Hand",
-        @"reactions":   @"Reactions",
-        @"focus":       @"To Meeting",
-        @"menu_toggle": @"Show / Hide Meet Bar",
-        @"menu_quit":   @"Quit MeetBar"
-    },
-    @"uk": @{
-        @"mic":         @"Мікрофон",
-        @"cam":         @"Камера",
-        @"hand":        @"Рука",
-        @"reactions":   @"Реакції",
-        @"focus":       @"До уроку",
-        @"menu_toggle": @"Показати / Сховати панель Meet",
-        @"menu_quit":   @"Вийти з MeetBar"
-    }
-};
-
-static NSString *Localized(NSString *key) {
-    NSString *lang = FORCE_LANGUAGE;
-    if (!lang) {
-        NSString *preferred = [NSLocale preferredLanguages].firstObject ?: @"en";
-        if ([preferred hasPrefix:@"uk"]) {
-            lang = @"uk";
-        } else {
-            lang = @"en";
-        }
-    }
-    NSDictionary *dict = kI18n[lang] ?: kI18n[@"en"];
-    return dict[key] ?: kI18n[@"en"][key] ?: key;
-}
-
-// --- Private Touch Bar and DFR APIs ---
 @interface NSTouchBarItem (Private)
 + (void)addSystemTrayItem:(NSTouchBarItem *)item;
 @end
@@ -71,6 +25,7 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
 @property (strong) NSArray<NSTouchBarItemIdentifier> *mainIdentifiersWithFocus;
 @property (strong) NSArray<NSTouchBarItemIdentifier> *reactionIdentifiers;
 @property (strong) NSStatusItem *statusItem;
+@property (strong) NSTimer *watchdogTimer;
 
 @property (strong) NSButton *micButton;
 @property (strong) NSButton *camButton;
@@ -78,9 +33,7 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
 
 @property (strong) NSMutableArray<NSString *> *commandQueue;
 @property (strong) dispatch_semaphore_t cmdSemaphore;
-
-@property (assign) NSTimeInterval lastHeartbeat;
-@property (strong) NSTimer *watchdogTimer;
+@property (strong) NSDate *lastMeetPing;
 @property (assign) BOOL isBarVisible;
 @property (assign) BOOL isShowingReactions;
 @property (assign) BOOL isOnMeetTab;
@@ -106,7 +59,7 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
     self.currentTrayId = [NSString stringWithFormat:@"com.local.meetbar.tray.%ld", (long)self.trayCounter];
     self.trayItem = [[NSCustomTouchBarItem alloc] initWithIdentifier:self.currentTrayId];
 
-    NSImage *trayImg = [self sfSymbol:@"video.bubble.left.fill"];
+    NSImage *trayImg = [self sfSymbol:@"video.fill"];
     if (@available(macOS 11.0, *)) {
         if (trayImg) {
             NSImageSymbolConfiguration *cfg = [NSImageSymbolConfiguration configurationWithPointSize:15.5 weight:NSFontWeightRegular];
@@ -132,7 +85,7 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
     [trayBtn setButtonType:NSButtonTypeMomentaryChange];
     trayBtn.bordered = NO;
     trayBtn.wantsLayer = YES;
-    // Native Control Strip dark tint (#3B3B3D) and standard 38pt width
+    // Точний темніший тон Control Strip (#3B3B3D -> 59/255) та ширина 38pt як у сусідніх кнопок
     trayBtn.layer.backgroundColor = [NSColor colorWithDisplayP3Red:54.5/255.0 green:54.5/255.0 blue:55.0/255.0 alpha:1.0].CGColor;
     trayBtn.layer.cornerRadius = 0.0;
     [trayBtn.widthAnchor constraintEqualToConstant:38].active = YES;
@@ -170,117 +123,87 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
 
             char buf[2048];
             ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);
-            if (n <= 0) {
-                close(client_fd);
-                continue;
-            }
-            buf[n] = '\0';
-            NSString *req = [NSString stringWithUTF8String:buf];
+            if (n > 0) {
+                buf[n] = '\0';
+                NSString *req = [NSString stringWithUTF8String:buf];
+                NSString *firstLine = [[req componentsSeparatedByString:@"\r\n"] firstObject];
 
-            if ([req containsString:@"OPTIONS /"]) {
-                const char *resp = "HTTP/1.1 204 No Content\r\n"
-                                   "Access-Control-Allow-Origin: *\r\n"
-                                   "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-                                   "Access-Control-Allow-Headers: Content-Type\r\n"
-                                   "Connection: close\r\n\r\n";
-                send(client_fd, resp, strlen(resp), 0);
-                close(client_fd);
-                continue;
-            }
+                BOOL hasMeet = [firstLine containsString:@"hasMeet=1"];
+                BOOL micOn = [firstLine containsString:@"mic=1"];
+                BOOL camOn = [firstLine containsString:@"cam=1"];
+                BOOL handUp = [firstLine containsString:@"hand=1"];
+                BOOL onMeet = [firstLine containsString:@"onMeet=1"];
 
-            if ([req containsString:@"POST /state"]) {
-                NSRange bodyRange = [req rangeOfString:@"\r\n\r\n"];
-                if (bodyRange.location != NSNotFound) {
-                    NSString *body = [req substringFromIndex:bodyRange.location + 4];
-                    NSData *data = [body dataUsingEncoding:NSUTF8StringEncoding];
-                    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                    if (json) {
-                        BOOL mic = [json[@"mic"] boolValue];
-                        BOOL cam = [json[@"cam"] boolValue];
-                        BOOL hand = [json[@"hand"] boolValue];
-                        BOOL onTab = json[@"onTab"] ? [json[@"onTab"] boolValue] : YES;
-
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            self.lastHeartbeat = [NSDate timeIntervalSinceReferenceDate];
-                            self.isOnMeetTab = onTab;
-
-                            if (!self.isShowingReactions) {
-                                NSArray *desired = onTab ? self.mainIdentifiers : self.mainIdentifiersWithFocus;
-                                if (![self.meetTouchBar.defaultItemIdentifiers isEqualToArray:desired]) {
-                                    self.meetTouchBar.defaultItemIdentifiers = desired;
-                                }
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (hasMeet) {
+                        self.lastMeetPing = [NSDate date];
+                        if (!self.isTrayVisible) {
+                            [self createTrayItem];
+                        }
+                        if (self.isOnMeetTab != onMeet) {
+                            self.isOnMeetTab = onMeet;
+                            if (!self.isShowingReactions && self.isBarVisible) {
+                                self.meetTouchBar.defaultItemIdentifiers = onMeet ? self.mainIdentifiers : self.mainIdentifiersWithFocus;
                             }
-                            [self updateButtonsWithMic:mic cam:cam hand:hand];
-
-                            if (!self.isTrayVisible) {
-                                [self createTrayItem];
-                            }
-                            if (!self.isBarVisible && !self.userDismissedManually) {
-                                [self showMeetBar];
-                            }
-                        });
+                        }
+                        if (!self.isBarVisible && !self.userDismissedManually) {
+                            [self showMeetBar];
+                        }
+                        [self updateButtonsWithMic:micOn cam:camOn hand:handUp];
+                    } else {
+                        [self hideMeetUI];
                     }
+                });
+
+                BOOL queueEmpty = NO;
+                @synchronized (self.commandQueue) {
+                    queueEmpty = (self.commandQueue.count == 0);
                 }
-                const char *resp = "HTTP/1.1 200 OK\r\n"
-                                   "Access-Control-Allow-Origin: *\r\n"
-                                   "Content-Type: application/json\r\n"
-                                   "Connection: close\r\n\r\n{\"ok\":true}";
-                send(client_fd, resp, strlen(resp), 0);
-                close(client_fd);
-                continue;
-            }
+                if (hasMeet && queueEmpty) {
+                    dispatch_semaphore_wait(self.cmdSemaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)));
+                }
 
-            if ([req containsString:@"GET /poll"]) {
-                dispatch_semaphore_wait(self.cmdSemaphore, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
-
-                NSString *cmd = @"";
+                NSString *cmdToSend = @"";
                 @synchronized (self.commandQueue) {
                     if (self.commandQueue.count > 0) {
-                        cmd = self.commandQueue.firstObject;
+                        cmdToSend = self.commandQueue.firstObject;
                         [self.commandQueue removeObjectAtIndex:0];
                     }
                 }
 
-                NSString *body = [NSString stringWithFormat:@"{\"command\":\"%@\"}", cmd];
-                NSData *bodyData = [body dataUsingEncoding:NSUTF8StringEncoding];
-                NSString *resp = [NSString stringWithFormat:
-                                  @"HTTP/1.1 200 OK\r\n"
-                                  "Access-Control-Allow-Origin: *\r\n"
-                                  "Content-Type: application/json\r\n"
-                                  "Content-Length: %lu\r\n"
-                                  "Connection: close\r\n\r\n%@",
-                                  (unsigned long)bodyData.length, body];
-                const char *cresp = [resp UTF8String];
-                send(client_fd, cresp, strlen(cresp), 0);
-                close(client_fd);
-                continue;
-            }
+                NSString *json = [NSString stringWithFormat:@"{\"cmd\":\"%@\"}", cmdToSend];
+                NSString *httpResp = [NSString stringWithFormat:
+                    @"HTTP/1.1 200 OK\r\n"
+                    @"Access-Control-Allow-Origin: *\r\n"
+                    @"Content-Type: application/json; charset=utf-8\r\n"
+                    @"Content-Length: %lu\r\n"
+                    @"Connection: close\r\n\r\n%@",
+                    (unsigned long)[json lengthOfBytesUsingEncoding:NSUTF8StringEncoding], json];
 
-            const char *resp = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
-            send(client_fd, resp, strlen(resp), 0);
+                const char *respBytes = [httpResp UTF8String];
+                send(client_fd, respBytes, strlen(respBytes), 0);
+            }
             close(client_fd);
         }
     });
 }
 
 - (void)hideMeetUI {
-    if (self.isTrayVisible && self.currentTrayId) {
-        DFRElementSetControlStripPresenceForIdentifier(self.currentTrayId, NO);
-        self.isTrayVisible = NO;
-    }
     if (self.isBarVisible) {
         [NSTouchBar dismissSystemModalTouchBar:self.meetTouchBar];
         self.isBarVisible = NO;
         self.isShowingReactions = NO;
-        self.meetTouchBar.defaultItemIdentifiers = self.isOnMeetTab ? self.mainIdentifiers : self.mainIdentifiersWithFocus;
+        self.meetTouchBar.defaultItemIdentifiers = self.mainIdentifiers;
+    }
+    if (self.isTrayVisible && self.currentTrayId) {
+        DFRElementSetControlStripPresenceForIdentifier(self.currentTrayId, NO);
+        self.isTrayVisible = NO;
     }
     self.userDismissedManually = NO;
 }
 
 - (void)checkWatchdog {
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    if (self.lastHeartbeat > 0 && (now - self.lastHeartbeat > 3.0)) {
-        self.lastHeartbeat = 0;
+    if (self.lastMeetPing == nil || [[NSDate date] timeIntervalSinceDate:self.lastMeetPing] > 2.5) {
         [self hideMeetUI];
     }
 }
@@ -303,9 +226,9 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
         self.statusItem.button.title = @"MeetBar";
     }
     NSMenu *menu = [[NSMenu alloc] init];
-    [menu addItemWithTitle:Localized(@"menu_toggle") action:@selector(toggleMeetBar:) keyEquivalent:@"m"];
+    [menu addItemWithTitle:@"Показати / Сховати панель Meet" action:@selector(toggleMeetBar:) keyEquivalent:@"m"];
     [menu addItem:[NSMenuItem separatorItem]];
-    [menu addItemWithTitle:Localized(@"menu_quit") action:@selector(terminate:) keyEquivalent:@"q"];
+    [menu addItemWithTitle:@"Вийти з MeetBar" action:@selector(terminate:) keyEquivalent:@"q"];
     self.statusItem.menu = menu;
 
     DFRSystemModalShowsCloseBoxWhenFrontMost(YES);
@@ -331,10 +254,10 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
         @"emoji.like",
         @"emoji.party",
         @"emoji.clap",
-        @"emoji.joy",
-        @"emoji.surprised",
+        @"emoji.laugh",
+        @"emoji.wow",
         @"emoji.sad",
-        @"emoji.thinking",
+        @"emoji.think",
         @"emoji.dislike"
     ];
 
@@ -343,7 +266,6 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
     self.meetTouchBar.defaultItemIdentifiers = self.mainIdentifiers;
 
     [self startHTTPServer];
-
     self.watchdogTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
                                                           target:self
                                                         selector:@selector(checkWatchdog)
@@ -414,23 +336,20 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
     return btn;
 }
 
-- (NSButton *)makeNotoEmojiButton:(NSString *)filename tag:(NSString *)tag {
-    NSString *bundlePath = [[NSBundle mainBundle] pathForResource:filename ofType:@"png" inDirectory:@"emojis"];
-    if (!bundlePath) {
-        bundlePath = [NSString stringWithFormat:@"/Users/matvii/MeetTouchBar/emojis/%@.png", filename];
-    }
-    NSImage *img = [[NSImage alloc] initWithContentsOfFile:bundlePath];
-    NSButton *btn = [NSButton buttonWithTitle:@"" target:self action:@selector(sendEmoji:)];
+- (NSButton *)makeNotoEmojiButton:(NSString *)code fallback:(NSString *)fallback tag:(NSInteger)tag width:(CGFloat)width {
+    NSString *path = [NSString stringWithFormat:@"%@/MeetTouchBar/emojis/%@.png", NSHomeDirectory(), code];
+    NSImage *img = [[NSImage alloc] initWithContentsOfFile:path];
+    NSButton *btn;
     if (img) {
-        [img setSize:NSMakeSize(22, 22)];
-        btn.image = img;
-        btn.imagePosition = NSImageOnly;
+        img.size = NSMakeSize(22, 22);
+        btn = [NSButton buttonWithImage:img target:self action:@selector(sendEmoji:)];
+        btn.imageScaling = NSImageScaleProportionallyDown;
     } else {
-        btn.title = tag;
+        btn = [NSButton buttonWithTitle:fallback target:self action:@selector(sendEmoji:)];
     }
+    btn.tag = tag;
     btn.bezelStyle = NSBezelStyleRounded;
-    btn.identifier = tag;
-    [btn.widthAnchor constraintEqualToConstant:46].active = YES;
+    [btn.widthAnchor constraintEqualToConstant:width].active = YES;
     return btn;
 }
 
@@ -439,42 +358,44 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
     NSButton *btn = nil;
 
     if ([identifier isEqualToString:@"com.local.meet.mic"]) {
-        btn = [self makeSymbolButton:@"mic.slash.fill" title:Localized(@"mic") action:@selector(toggleMic:)];
+        btn = [self makeSymbolButton:@"mic.slash.fill" title:@"Мікрофон" action:@selector(toggleMic:)];
         self.micButton = btn;
     } else if ([identifier isEqualToString:@"com.local.meet.cam"]) {
-        btn = [self makeSymbolButton:@"video.slash.fill" title:Localized(@"cam") action:@selector(toggleCam:)];
+        btn = [self makeSymbolButton:@"video.slash.fill" title:@"Камера" action:@selector(toggleCam:)];
         self.camButton = btn;
     } else if ([identifier isEqualToString:@"com.local.meet.hand"]) {
-        btn = [self makeSymbolButton:@"hand.raised.fill" title:Localized(@"hand") action:@selector(toggleHand:)];
+        btn = [self makeSymbolButton:@"hand.raised.fill" title:@"Рука" action:@selector(toggleHand:)];
         self.handButton = btn;
     } else if ([identifier isEqualToString:@"com.local.meet.reactions"]) {
-        btn = [self makeSymbolButton:@"face.smiling" title:Localized(@"reactions") action:@selector(openReactionsBar:)];
+        btn = [self makeSymbolButton:@"face.smiling" title:@"Реакції" action:@selector(openReactionsBar:)];
     } else if ([identifier isEqualToString:@"com.local.meet.focus"]) {
-        btn = [self makeSymbolButton:@"arrow.up.forward.app.fill" title:Localized(@"focus") action:@selector(focusMeetTab:)];
+        btn = [self makeSymbolButton:@"arrow.up.forward.app.fill" title:@"До уроку" action:@selector(focusMeetTab:)];
+        [btn.widthAnchor constraintGreaterThanOrEqualToConstant:115].active = YES;
     } else if ([identifier isEqualToString:@"emoji.back"]) {
         btn = [self makeSymbolButton:@"chevron.left" title:@"" action:@selector(closeReactionsBar:)];
-        [btn.widthAnchor constraintEqualToConstant:48].active = YES;
+        [btn.widthAnchor constraintEqualToConstant:64].active = YES;
     } else if ([identifier isEqualToString:@"emoji.heart"]) {
-        btn = [self makeNotoEmojiButton:@"sparkling_heart" tag:@"💖"];
+        btn = [self makeNotoEmojiButton:@"1f496" fallback:@"💖" tag:1 width:46];
     } else if ([identifier isEqualToString:@"emoji.like"]) {
-        btn = [self makeNotoEmojiButton:@"thumbs_up" tag:@"👍"];
+        btn = [self makeNotoEmojiButton:@"1f44d" fallback:@"👍" tag:2 width:46];
     } else if ([identifier isEqualToString:@"emoji.party"]) {
-        btn = [self makeNotoEmojiButton:@"party_popper" tag:@"🎉"];
+        btn = [self makeNotoEmojiButton:@"1f389" fallback:@"🎉" tag:3 width:46];
     } else if ([identifier isEqualToString:@"emoji.clap"]) {
-        btn = [self makeNotoEmojiButton:@"clapping_hands" tag:@"👏"];
-    } else if ([identifier isEqualToString:@"emoji.joy"]) {
-        btn = [self makeNotoEmojiButton:@"joy" tag:@"😂"];
-    } else if ([identifier isEqualToString:@"emoji.surprised"]) {
-        btn = [self makeNotoEmojiButton:@"open_mouth" tag:@"😮"];
+        btn = [self makeNotoEmojiButton:@"1f44f" fallback:@"👏" tag:4 width:46];
+    } else if ([identifier isEqualToString:@"emoji.laugh"]) {
+        btn = [self makeNotoEmojiButton:@"1f602" fallback:@"😂" tag:5 width:46];
+    } else if ([identifier isEqualToString:@"emoji.wow"]) {
+        btn = [self makeNotoEmojiButton:@"1f62e" fallback:@"😮" tag:6 width:46];
     } else if ([identifier isEqualToString:@"emoji.sad"]) {
-        btn = [self makeNotoEmojiButton:@"crying_face" tag:@"😢"];
-    } else if ([identifier isEqualToString:@"emoji.thinking"]) {
-        btn = [self makeNotoEmojiButton:@"thinking_face" tag:@"🤔"];
+        btn = [self makeNotoEmojiButton:@"1f622" fallback:@"😢" tag:7 width:46];
+    } else if ([identifier isEqualToString:@"emoji.think"]) {
+        btn = [self makeNotoEmojiButton:@"1f914" fallback:@"🤔" tag:8 width:46];
     } else if ([identifier isEqualToString:@"emoji.dislike"]) {
-        btn = [self makeNotoEmojiButton:@"thumbs_down" tag:@"👎"];
+        btn = [self makeNotoEmojiButton:@"1f44e" fallback:@"👎" tag:9 width:46];
     }
 
     if (btn) {
+        btn.bezelStyle = NSBezelStyleRounded;
         item.view = btn;
     }
     return item;
@@ -487,27 +408,25 @@ extern void DFRSystemModalShowsCloseBoxWhenFrontMost(BOOL shows);
     dispatch_semaphore_signal(self.cmdSemaphore);
 }
 
-- (void)toggleMic:(id)sender {
-    [self enqueueCommand:@"toggleMic"];
-}
-
-- (void)toggleCam:(id)sender {
-    [self enqueueCommand:@"toggleCam"];
-}
-
-- (void)toggleHand:(id)sender {
-    [self enqueueCommand:@"toggleHand"];
-}
-
-- (void)focusMeetTab:(id)sender {
-    [self enqueueCommand:@"focusMeetTab"];
-}
+- (void)toggleMic:(id)sender { [self enqueueCommand:@"mic"]; }
+- (void)toggleCam:(id)sender { [self enqueueCommand:@"cam"]; }
+- (void)toggleHand:(id)sender { [self enqueueCommand:@"hand"]; }
+- (void)focusMeetTab:(id)sender { [self enqueueCommand:@"focusMeet"]; }
 
 - (void)sendEmoji:(NSButton *)sender {
-    NSString *tag = sender.identifier;
-    if (tag) {
-        [self enqueueCommand:[NSString stringWithFormat:@"emoji:%@", tag]];
+    NSString *emoji = @"💖";
+    switch (sender.tag) {
+        case 1: emoji = @"💖"; break;
+        case 2: emoji = @"👍"; break;
+        case 3: emoji = @"🎉"; break;
+        case 4: emoji = @"👏"; break;
+        case 5: emoji = @"😂"; break;
+        case 6: emoji = @"😮"; break;
+        case 7: emoji = @"😢"; break;
+        case 8: emoji = @"🤔"; break;
+        case 9: emoji = @"👎"; break;
     }
+    [self enqueueCommand:[NSString stringWithFormat:@"emoji:%@", emoji]];
 }
 
 @end
